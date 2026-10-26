@@ -1,0 +1,45 @@
+{
+  "name": "kelela-solutions-compliance-platform",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.19.0",
+    "argon2": "^0.40.3",
+    "clsx": "^2.1.1",
+    "jose": "^5.9.3",
+    "lucide-react": "^0.441.0",
+    "next": "^14.2.5",
+    "nodemailer": "^6.9.15",
+    "otplib": "^12.0.1",
+    "pdf-lib": "^1.17.1",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.12.7",
+    "tailwind-merge": "^2.5.2",
+    "zod": "^3.23.8"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^6.4.16",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.41",
+    "@types/node": "^20.14.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.3",
+    "prisma": "^5.19.0",
+    "tailwindcss": "^3.4.10",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}
