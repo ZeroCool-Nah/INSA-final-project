@@ -1,0 +1,357 @@
+// =====================================================================
+// INSA / NBE Cybersecurity Compliance Platform — Prisma Schema
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------
+
+enum UserRole {
+  SUPER_ADMIN         // Kelela Solutions' top platform operator — not scoped to a tenant org
+  PLATFORM_ADMIN      // Kelela Solutions staff who onboard/manage tenant orgs — also platform-scoped
+  ORG_ADMIN           // tenant's own administrator (was "ADMIN")
+  COMPLIANCE_OFFICER
+  AUDITOR
+  IT_MANAGER
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  TRIAL
+  SUSPENDED
+  // Soft-deleted, not hard-deleted — see Organization.deletedAt. A
+  // compliance platform destroying a tenant's audit trail the moment they
+  // stop paying is its own liability; this blocks access and hides the org
+  // from the active roster without touching any of their records.
+  DELETED
+}
+
+enum Sector {
+  FINANCIAL
+  TELECOM
+  ENERGY
+  GOVERNMENT
+  HEALTHCARE
+  OTHER
+}
+
+enum FrameworkCode {
+  INSA
+  NBE
+  ISO27001
+  NIST_CSF
+  PCI_DSS
+  SOC2
+}
+
+enum RiskLevel {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum AssessmentStatus {
+  NOT_STARTED
+  IN_REVIEW
+  NON_COMPLIANT
+  COMPLIANT
+  NOT_APPLICABLE
+}
+
+enum IncidentSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum IncidentStatus {
+  DETECTED
+  CONTAINED
+  ERADICATED
+  RECOVERED
+  REPORTED_TO_INSA
+  CLOSED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  STATUS_CHANGE
+  EVIDENCE_UPLOAD
+  EVIDENCE_DOWNLOAD
+  EXPORT
+  LOGIN
+  LOGIN_FAILED
+  MFA_ENABLED
+  MFA_DISABLED
+}
+
+enum NotificationType {
+  SLA_BREACH
+  SLA_AT_RISK
+  CONTROL_DUE_SOON
+  CONTROL_OVERDUE
+  EVIDENCE_UPLOADED
+  CONTROL_ASSIGNED
+}
+
+// ---------------------------------------------------------------------
+// Organizations & Users
+// ---------------------------------------------------------------------
+
+model Organization {
+  id            String    @id @default(cuid())
+  name          String
+  sector        Sector
+  tinNumber     String?   @unique // Ethiopian Taxpayer Identification Number
+  status        OrganizationStatus @default(ACTIVE)
+  deletedAt     DateTime? // set when status transitions to DELETED; cleared on restore
+  planTier      String?   // e.g. "Standard", "Enterprise" — free-text for now
+  primaryContactEmail String?
+  // Org-wide MFA policy, settable by ORG_ADMIN. When true, every user in
+  // this org is gated to an MFA-enrollment screen on login until they
+  // enroll — enforced in (dashboard)/layout.tsx, not just suggested.
+  requireMfa    Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  users         User[]
+  assessments   ControlAssessment[]
+  incidents     Incident[]
+  auditLog      AuditLogEntry[]
+
+  @@map("organizations")
+}
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  passwordHash      String    // Argon2id
+  fullName          String
+  role              UserRole  @default(IT_MANAGER)
+  // Null for SUPER_ADMIN and PLATFORM_ADMIN — Kelela Solutions platform
+  // staff aren't scoped to any single tenant. Every other role must belong
+  // to an org; enforced in application code (Prisma can't conditionally
+  // require a FK).
+  organizationId    String?
+  organization      Organization? @relation(fields: [organizationId], references: [id])
+
+  mfaSecret         String?   // encrypted at rest, TOTP seed — only set once enrollment is verified
+  mfaEnabled        Boolean   @default(false)
+  mfaPendingSecret  String?   // temp secret during enrollment, before the user confirms a code
+  failedLoginCount  Int       @default(0)
+  lockedUntil       DateTime?
+  lastLoginAt       DateTime?
+
+  assignedAssessments ControlAssessment[] @relation("AssignedTo")
+  auditLogEntries     AuditLogEntry[]
+  notifications       Notification[]
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([organizationId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------
+// Regulatory frameworks & controls
+// ---------------------------------------------------------------------
+
+model ComplianceFramework {
+  id          String        @id @default(cuid())
+  code        FrameworkCode
+  name        String        // e.g. "INSA Critical Infrastructure Proclamation No. 1263/2021"
+  version     String
+  effectiveDate DateTime
+
+  controls    ComplianceControl[]
+
+  @@unique([code, version])
+  @@map("compliance_frameworks")
+}
+
+model ComplianceControl {
+  id              String    @id @default(cuid())
+  frameworkId     String
+  framework       ComplianceFramework @relation(fields: [frameworkId], references: [id])
+
+  controlRef      String    // e.g. "INSA-AC-04", "NBE-CSD-3.2"
+  category        String    // e.g. "Access Control", "Incident Response"
+  requirementText String    @db.Text
+  riskLevel       RiskLevel
+  appliesToSector Sector[]  // empty = applies to all sectors
+  mappedIsoRefs   String[]  // cross-mapped ISO 27001 / NIST CSF control IDs
+
+  assessments     ControlAssessment[]
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([frameworkId, controlRef])
+  @@index([riskLevel])
+  @@map("compliance_controls")
+}
+
+// ---------------------------------------------------------------------
+// Per-organization assessment of each control
+// ---------------------------------------------------------------------
+
+model ControlAssessment {
+  id              String            @id @default(cuid())
+  controlId       String
+  control         ComplianceControl @relation(fields: [controlId], references: [id])
+  organizationId  String
+  organization    Organization      @relation(fields: [organizationId], references: [id])
+
+  status          AssessmentStatus  @default(NOT_STARTED)
+  assignedToId    String?
+  assignedTo      User?             @relation("AssignedTo", fields: [assignedToId], references: [id])
+  linkedAssetName String?           // free-text asset/system this control protects
+  notes           String?           @db.Text
+
+  dueDate         DateTime?
+
+  evidenceFileUrl String?
+  evidenceHash    String?           // SHA-256, computed server-side pre-save
+  evidenceFileName String?
+
+  // When true, an SLA-breached incident linked to this control is allowed
+  // to automatically flip status to NON_COMPLIANT. Any manual status edit
+  // via the UI sets this false so automation never overwrites a human call.
+  slaAutoFlag     Boolean           @default(true)
+
+  lastUpdated     DateTime          @updatedAt
+  createdAt       DateTime          @default(now())
+
+  auditLog        AuditLogEntry[]
+  incidents       Incident[]
+
+  @@unique([controlId, organizationId])
+  @@index([organizationId, status])
+  @@index([dueDate])
+  @@map("control_assessments")
+}
+
+// ---------------------------------------------------------------------
+// Incidents & INSA disclosure SLA tracking
+// ---------------------------------------------------------------------
+
+model Incident {
+  id               String           @id @default(cuid())
+  organizationId   String
+  organization     Organization     @relation(fields: [organizationId], references: [id])
+
+  title            String
+  description      String           @db.Text
+  severity         IncidentSeverity
+  status           IncidentStatus   @default(DETECTED)
+
+  detectedAt       DateTime
+  slaDeadline       DateTime         // detectedAt + 48h (INSA mandatory window)
+  insaReportedAt   DateTime?
+
+  affectedSystems  String[]
+
+  // Optional link to the org's assessment of a specific control (e.g. an
+  // incident-response control). Drives the auto-flag behavior below.
+  linkedControlAssessmentId String?
+  linkedControlAssessment   ControlAssessment? @relation(fields: [linkedControlAssessmentId], references: [id])
+
+  auditLog         AuditLogEntry[]
+
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([organizationId, status])
+  @@index([slaDeadline])
+  @@map("incidents")
+}
+
+// ---------------------------------------------------------------------
+// Immutable audit trail — append-only (no update/delete DB grants)
+// ---------------------------------------------------------------------
+
+model AuditLogEntry {
+  id                  String   @id @default(cuid())
+  // Null for platform-level actions (e.g. a SUPER_ADMIN action not scoped
+  // to one tenant, like creating a new organization).
+  organizationId      String?
+  organization        Organization? @relation(fields: [organizationId], references: [id])
+  actorId             String
+  actor                User     @relation(fields: [actorId], references: [id])
+
+  action              AuditAction
+  entityType          String   // "ControlAssessment" | "Incident" | "User" ...
+  entityId            String
+  controlAssessmentId String?
+  controlAssessment   ControlAssessment? @relation(fields: [controlAssessmentId], references: [id])
+  incidentId          String?
+  incident            Incident? @relation(fields: [incidentId], references: [id])
+
+  beforeState         Json?
+  afterState          Json?
+  ipAddress           String?
+  userAgent           String?
+
+  createdAt           DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_log_entries")
+}
+
+// ---------------------------------------------------------------------
+// Readiness history — one row per org per day, powers the trend chart.
+// Recorded whenever an assessment status changes (see lib/snapshot.ts).
+// ---------------------------------------------------------------------
+
+model ReadinessSnapshot {
+  id             String   @id @default(cuid())
+  organizationId String
+  date           DateTime // truncated to day
+  insaPct        Int
+  nbePct         Int
+  overallPct     Int
+  createdAt      DateTime @default(now())
+
+  @@unique([organizationId, date])
+  @@index([organizationId, date])
+  @@map("readiness_snapshots")
+}
+
+// ---------------------------------------------------------------------
+// In-app notifications — SLA breaches, upcoming due dates, evidence events.
+// userId null = org-wide notification (visible to all members of the org).
+// ---------------------------------------------------------------------
+
+model Notification {
+  id             String           @id @default(cuid())
+  organizationId String
+  userId         String?
+  user           User?            @relation(fields: [userId], references: [id])
+
+  type           NotificationType
+  title          String
+  message        String
+  link           String?          // e.g. "/incidents" or "/controls?highlight=..."
+  dedupeKey      String           // stable key so the same condition doesn't spam duplicates
+  read           Boolean          @default(false)
+
+  createdAt      DateTime         @default(now())
+
+  @@unique([organizationId, dedupeKey])
+  @@index([organizationId, read, createdAt])
+  @@map("notifications")
+}
